@@ -58,7 +58,7 @@ Each model will eventually contain:
 
 ## Current Status
 
-🚧 Early development
+Early development
 
 The first set of stochastic process simulations is currently being implemented.
 
