@@ -401,21 +401,4 @@ Implementation plan:
 3. Average those tail losses.
 4. Compare VaR and CVaR under stressed scenarios.
 
-## Project Quality Checklist
 
-Before a model is considered complete, it should have:
-
-- Clear file name and class/function names
-- Valid input checks
-- Reproducible examples with seeds
-- At least one visualization idea
-- At least one sanity test
-- Human-readable README or documentation notes
-
-## Good GitHub Presentation Ideas
-
-- Add screenshots of plots in the README after generating them locally
-- Add a notebook for each major model family
-- Add short explanations before code blocks
-- Keep commits grouped by model family
-- Write model docs like a student explaining what they learned
