@@ -1,118 +1,172 @@
 import numpy as np
+from typing import Callable, Tuple
 
 
-def simulate_gbm_paths(
-    spot: float,
-    risk_free_rate: float,
-    volatility: float,
-    maturity: float = 1.0,
-    steps: int = 252,
-    paths: int = 10000,
-    dividend_yield: float = 0.0,
-    seed=None,
-):
-    if spot <= 0:
-        raise ValueError("spot must be positive.")
-    if volatility < 0:
-        raise ValueError("volatility cannot be negative.")
-    if maturity <= 0:
-        raise ValueError("maturity must be positive.")
-    if steps <= 0 or paths <= 0:
-        raise ValueError("steps and paths must be positive.")
-
-    rng = np.random.default_rng(seed)
-    dt = maturity / steps
-    shocks = rng.normal(size=(paths, steps))
-    drift = (risk_free_rate - dividend_yield - 0.5 * volatility**2) * dt
-    diffusion = volatility * np.sqrt(dt) * shocks
-
-    log_paths = np.cumsum(drift + diffusion, axis=1)
-    log_paths = np.column_stack([np.zeros(paths), log_paths])
-    return spot * np.exp(log_paths)
-
-
-def price_arithmetic_asian_call(
-    spot: float,
-    strike: float,
-    risk_free_rate: float,
-    volatility: float,
-    maturity: float = 1.0,
-    steps: int = 252,
-    paths: int = 10000,
-    seed=None,
-) -> tuple[float, float]:
-    simulated = simulate_gbm_paths(
-        spot=spot,
-        risk_free_rate=risk_free_rate,
-        volatility=volatility,
-        maturity=maturity,
-        steps=steps,
-        paths=paths,
-        seed=seed,
-    )
-    average_prices = simulated[:, 1:].mean(axis=1)
-    payoffs = np.maximum(average_prices - strike, 0.0)
-    discount = np.exp(-risk_free_rate * maturity)
-    discounted = discount * payoffs
-    standard_error = discounted.std(ddof=1) / np.sqrt(paths)
-    return float(discounted.mean()), float(standard_error)
-
-
-def price_up_and_out_call(
-    spot: float,
-    strike: float,
-    barrier: float,
-    risk_free_rate: float,
-    volatility: float,
-    maturity: float = 1.0,
-    steps: int = 252,
-    paths: int = 10000,
-    rebate: float = 0.0,
-    seed=None,
-) -> tuple[float, float]:
-    if barrier <= spot:
-        raise ValueError("For an up-and-out call, barrier should be above spot.")
-
-    simulated = simulate_gbm_paths(
-        spot=spot,
-        risk_free_rate=risk_free_rate,
-        volatility=volatility,
-        maturity=maturity,
-        steps=steps,
-        paths=paths,
-        seed=seed,
-    )
-    knocked_out = (simulated >= barrier).any(axis=1)
-    vanilla_payoff = np.maximum(simulated[:, -1] - strike, 0.0)
-    payoffs = np.where(knocked_out, rebate, vanilla_payoff)
-    discount = np.exp(-risk_free_rate * maturity)
-    discounted = discount * payoffs
-    standard_error = discounted.std(ddof=1) / np.sqrt(paths)
-    return float(discounted.mean()), float(standard_error)
-
-
-def price_fixed_strike_lookback_call(
-    spot: float,
-    strike: float,
-    risk_free_rate: float,
-    volatility: float,
-    maturity: float = 1.0,
-    steps: int = 252,
-    paths: int = 10000,
-    seed=None,
-) -> tuple[float, float]:
-    simulated = simulate_gbm_paths(
-        spot=spot,
-        risk_free_rate=risk_free_rate,
-        volatility=volatility,
-        maturity=maturity,
-        steps=steps,
-        paths=paths,
-        seed=seed,
-    )
-    maximum_prices = simulated.max(axis=1)
-    payoffs = np.maximum(maximum_prices - strike, 0.0)
-    discount = np.exp(-risk_free_rate * maturity)
-    discounted = discount * payoffs
-    standard_error = discounted.std(ddof=1) / np.sqrt(paths)
-    return float(discounted.mean()), float(standard_error)
+class ExoticOptions:
+    """
+    Monte Carlo pricing for exotic options.
+    
+    Provides pricing methods for path-dependent options that don't have
+    closed-form solutions: Asian, Barrier, and Lookback options.
+    """
+    
+    @staticmethod
+    def asian_option(
+        paths: np.ndarray,
+        strike: float,
+        option_type: str = "call",
+        averaging: str = "arithmetic",
+        discount_factor: float = 1.0
+    ) -> Tuple[float, float]:
+        """
+        Price Asian option (average price option).
+        
+        Payoff (Call): max(A - K, 0) where A is average price
+        Payoff (Put): max(K - A, 0)
+        
+        Args:
+            paths: Array of shape (steps, paths) with simulated prices
+            strike: K, strike price
+            option_type: "call" or "put"
+            averaging: "arithmetic" or "geometric"
+            discount_factor: Discount factor (e.g., exp(-r*T))
+            
+        Returns:
+            Tuple of (option price, standard error)
+        """
+        if averaging == "arithmetic":
+            averages = np.mean(paths, axis=0)
+        elif averaging == "geometric":
+            averages = np.exp(np.mean(np.log(paths), axis=0))
+        else:
+            raise ValueError("averaging must be 'arithmetic' or 'geometric'")
+        
+        if option_type == "call":
+            payoffs = np.maximum(averages - strike, 0)
+        elif option_type == "put":
+            payoffs = np.maximum(strike - averages, 0)
+        else:
+            raise ValueError("option_type must be 'call' or 'put'")
+        
+        price = discount_factor * np.mean(payoffs)
+        std_error = discount_factor * np.std(payoffs) / np.sqrt(len(payoffs))
+        
+        return price, std_error
+    
+    @staticmethod
+    def barrier_option(
+        paths: np.ndarray,
+        strike: float,
+        barrier: float,
+        option_type: str = "call",
+        barrier_type: str = "knock_out",
+        barrier_side: str = "up",
+        discount_factor: float = 1.0,
+        rebate: float = 0.0
+    ) -> Tuple[float, float]:
+        """
+        Price Barrier option (knock-in or knock-out).
+        
+        Knock-out: Option becomes void if barrier is hit
+        Knock-in: Option becomes active only if barrier is hit
+        
+        Args:
+            paths: Array of shape (steps, paths) with simulated prices
+            strike: K, strike price
+            barrier: H, barrier level
+            option_type: "call" or "put"
+            barrier_type: "knock_out" or "knock_in"
+            barrier_side: "up" (up-and-out/in) or "down" (down-and-out/in)
+            discount_factor: Discount factor
+            rebate: Rebate paid if option knocked out
+            
+        Returns:
+            Tuple of (option price, standard error)
+        """
+        num_paths = paths.shape[1]
+        final_prices = paths[-1, :]
+        
+        if option_type == "call":
+            payoffs = np.maximum(final_prices - strike, 0)
+        elif option_type == "put":
+            payoffs = np.maximum(strike - final_prices, 0)
+        else:
+            raise ValueError("option_type must be 'call' or 'put'")
+        
+        # Check barrier conditions
+        if barrier_side == "up":
+            barrier_hit = np.max(paths, axis=0) >= barrier
+        elif barrier_side == "down":
+            barrier_hit = np.min(paths, axis=0) <= barrier
+        else:
+            raise ValueError("barrier_side must be 'up' or 'down'")
+        
+        # Apply barrier logic
+        if barrier_type == "knock_out":
+            payoffs[barrier_hit] = rebate
+        elif barrier_type == "knock_in":
+            payoffs[~barrier_hit] = 0
+        else:
+            raise ValueError("barrier_type must be 'knock_out' or 'knock_in'")
+        
+        price = discount_factor * np.mean(payoffs)
+        std_error = discount_factor * np.std(payoffs) / np.sqrt(num_paths)
+        
+        return price, std_error
+    
+    @staticmethod
+    def lookback_option(
+        paths: np.ndarray,
+        strike: float = None,
+        option_type: str = "call",
+        lookback_type: str = "fixed",
+        discount_factor: float = 1.0
+    ) -> Tuple[float, float]:
+        """
+        Price Lookback option (depends on minimum/maximum price during path).
+        
+        Fixed strike: Payoff depends on running max/min
+        Floating strike: Strike is running min/max
+        
+        Args:
+            paths: Array of shape (steps, paths) with simulated prices
+            strike: K, strike price (required for fixed strike)
+            option_type: "call" or "put"
+            lookback_type: "fixed" (fixed strike) or "floating" (floating strike)
+            discount_factor: Discount factor
+            
+        Returns:
+            Tuple of (option price, standard error)
+        """
+        num_paths = paths.shape[1]
+        final_prices = paths[-1, :]
+        
+        max_prices = np.max(paths, axis=0)
+        min_prices = np.min(paths, axis=0)
+        
+        if lookback_type == "fixed":
+            if strike is None:
+                raise ValueError("strike required for fixed strike lookback")
+            
+            if option_type == "call":
+                payoffs = np.maximum(max_prices - strike, 0)
+            elif option_type == "put":
+                payoffs = np.maximum(strike - min_prices, 0)
+            else:
+                raise ValueError("option_type must be 'call' or 'put'")
+        
+        elif lookback_type == "floating":
+            if option_type == "call":
+                payoffs = final_prices - min_prices
+            elif option_type == "put":
+                payoffs = max_prices - final_prices
+            else:
+                raise ValueError("option_type must be 'call' or 'put'")
+        
+        else:
+            raise ValueError("lookback_type must be 'fixed' or 'floating'")
+        
+        price = discount_factor * np.mean(payoffs)
+        std_error = discount_factor * np.std(payoffs) / np.sqrt(num_paths)
+        
+        return price, std_error

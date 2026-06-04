@@ -1,129 +1,197 @@
-from dataclasses import dataclass
-
 import numpy as np
-from scipy.optimize import minimize
+from scipy.optimize import minimize, LinearConstraint, Bounds
+from typing import Tuple, Dict
 
 
-def _as_array(values):
-    return np.asarray(values, dtype=float)
-
-
-@dataclass(frozen=True)
-class PortfolioResult:
-    weights: np.ndarray
-    expected_return: float
-    volatility: float
-    sharpe_ratio: float
-
-
-class MarkowitzPortfolioOptimizer:
-    """Mean-variance portfolio optimization using Markowitz ideas."""
-
-    def __init__(self, expected_returns, covariance_matrix, risk_free_rate: float = 0.0):
-        self.expected_returns = _as_array(expected_returns)
-        self.covariance_matrix = _as_array(covariance_matrix)
-        self.risk_free_rate = risk_free_rate
-
-        if self.expected_returns.ndim != 1:
-            raise ValueError("expected_returns must be one-dimensional.")
-        if self.covariance_matrix.shape != (
-            len(self.expected_returns),
-            len(self.expected_returns),
-        ):
-            raise ValueError("covariance_matrix shape must match expected_returns.")
-
-    @property
-    def asset_count(self) -> int:
-        return len(self.expected_returns)
-
-    def portfolio_return(self, weights) -> float:
-        weights = _as_array(weights)
-        return float(weights @ self.expected_returns)
-
-    def portfolio_volatility(self, weights) -> float:
-        weights = _as_array(weights)
-        variance = weights @ self.covariance_matrix @ weights
-        return float(np.sqrt(max(variance, 0.0)))
-
-    def sharpe_ratio(self, weights) -> float:
-        volatility = self.portfolio_volatility(weights)
-        if volatility == 0:
-            return 0.0
-
-        return (self.portfolio_return(weights) - self.risk_free_rate) / volatility
-
-    def _bounds(self, allow_short: bool):
-        if allow_short:
-            return [(-1.0, 1.0)] * self.asset_count
-        return [(0.0, 1.0)] * self.asset_count
-
-    def _result(self, weights) -> PortfolioResult:
-        return PortfolioResult(
-            weights=np.asarray(weights, dtype=float),
-            expected_return=self.portfolio_return(weights),
-            volatility=self.portfolio_volatility(weights),
-            sharpe_ratio=self.sharpe_ratio(weights),
-        )
-
-    def minimum_variance(self, allow_short: bool = False) -> PortfolioResult:
-        initial_weights = np.full(self.asset_count, 1 / self.asset_count)
-        constraints = {"type": "eq", "fun": lambda weights: np.sum(weights) - 1}
-
+class Markowitz:
+    """
+    Markowitz Mean-Variance Portfolio Optimization.
+    
+    Finds optimal portfolio weights that minimize variance for a target return,
+    or maximize Sharpe ratio (return per unit of risk).
+    
+    Mathematical formulation:
+    min: w'Σw
+    s.t.: w'μ = target_return
+          Σw_i = 1
+          w_i ≥ 0 (or allow short selling)
+    """
+    
+    def __init__(
+        self,
+        expected_returns: np.ndarray,
+        covariance_matrix: np.ndarray,
+        risk_free_rate: float = 0.0
+    ):
+        """
+        Initialize portfolio optimizer.
+        
+        Args:
+            expected_returns: Array of expected returns for each asset
+            covariance_matrix: Covariance matrix of asset returns
+            risk_free_rate: Risk-free rate for Sharpe ratio calculations
+        """
+        self.mu = expected_returns
+        self.sigma = covariance_matrix
+        self.rf = risk_free_rate
+        self.n_assets = len(expected_returns)
+        
+        if covariance_matrix.shape != (self.n_assets, self.n_assets):
+            raise ValueError("Covariance matrix shape doesn't match returns")
+    
+    def min_variance_portfolio(self) -> Tuple[np.ndarray, float, float]:
+        """
+        Find the Global Minimum Variance Portfolio (MVP).
+        
+        Returns:
+            Tuple of (optimal weights, expected return, variance)
+        """
+        def portfolio_variance(w):
+            return w @ self.sigma @ w
+        
+        constraints = {
+            'type': 'eq',
+            'fun': lambda w: np.sum(w) - 1  # Weights sum to 1
+        }
+        
+        bounds = Bounds(0, 1)  # No short selling
+        initial_guess = np.ones(self.n_assets) / self.n_assets
+        
         result = minimize(
-            lambda weights: self.portfolio_volatility(weights),
-            initial_weights,
-            method="SLSQP",
-            bounds=self._bounds(allow_short),
-            constraints=constraints,
+            portfolio_variance,
+            initial_guess,
+            method='SLSQP',
+            bounds=bounds,
+            constraints=constraints
         )
-
-        if not result.success:
-            raise RuntimeError(f"Optimization failed: {result.message}")
-
-        return self._result(result.x)
-
-    def maximum_sharpe(self, allow_short: bool = False) -> PortfolioResult:
-        initial_weights = np.full(self.asset_count, 1 / self.asset_count)
-        constraints = {"type": "eq", "fun": lambda weights: np.sum(weights) - 1}
-
+        
+        w_opt = result.x
+        p_return = w_opt @ self.mu
+        p_variance = w_opt @ self.sigma @ w_opt
+        
+        return w_opt, p_return, p_variance
+    
+    def max_sharpe_portfolio(
+        self,
+        allow_short_selling: bool = False
+    ) -> Tuple[np.ndarray, float, float, float]:
+        """
+        Find the Maximum Sharpe Ratio Portfolio.
+        
+        Args:
+            allow_short_selling: If True, allow negative weights (short selling)
+            
+        Returns:
+            Tuple of (optimal weights, expected return, std deviation, Sharpe ratio)
+        """
+        def negative_sharpe_ratio(w):
+            p_return = w @ self.mu
+            p_std = np.sqrt(w @ self.sigma @ w)
+            if p_std == 0:
+                return 0
+            return -(p_return - self.rf) / p_std
+        
+        constraints = {
+            'type': 'eq',
+            'fun': lambda w: np.sum(w) - 1  # Weights sum to 1
+        }
+        
+        if allow_short_selling:
+            bounds = None  # Allow any weights
+        else:
+            bounds = Bounds(0, 1)  # No short selling
+        
+        initial_guess = np.ones(self.n_assets) / self.n_assets
+        
         result = minimize(
-            lambda weights: -self.sharpe_ratio(weights),
-            initial_weights,
-            method="SLSQP",
-            bounds=self._bounds(allow_short),
-            constraints=constraints,
+            negative_sharpe_ratio,
+            initial_guess,
+            method='SLSQP',
+            bounds=bounds,
+            constraints=constraints
         )
-
-        if not result.success:
-            raise RuntimeError(f"Optimization failed: {result.message}")
-
-        return self._result(result.x)
-
-    def efficient_frontier(self, points: int = 25, allow_short: bool = False) -> list[PortfolioResult]:
-        if points <= 1:
-            raise ValueError("points must be greater than 1.")
-
-        target_returns = np.linspace(self.expected_returns.min(), self.expected_returns.max(), points)
-        frontier = []
-        initial_weights = np.full(self.asset_count, 1 / self.asset_count)
-
-        for target_return in target_returns:
-            constraints = (
-                {"type": "eq", "fun": lambda weights: np.sum(weights) - 1},
-                {
-                    "type": "eq",
-                    "fun": lambda weights, target=target_return: self.portfolio_return(weights) - target,
-                },
-            )
+        
+        w_opt = result.x
+        p_return = w_opt @ self.mu
+        p_std = np.sqrt(w_opt @ self.sigma @ w_opt)
+        sharpe = (p_return - self.rf) / p_std if p_std > 0 else 0
+        
+        return w_opt, p_return, p_std, sharpe
+    
+    def efficient_frontier(
+        self,
+        target_returns: np.ndarray,
+        allow_short_selling: bool = False
+    ) -> Dict[str, np.ndarray]:
+        """
+        Compute the efficient frontier by finding minimum variance portfolios
+        for each target return.
+        
+        Args:
+            target_returns: Array of target returns
+            allow_short_selling: If True, allow short selling
+            
+        Returns:
+            Dictionary with 'returns', 'stds', and 'weights' arrays
+        """
+        frontier_returns = []
+        frontier_stds = []
+        frontier_weights = []
+        
+        for target_ret in target_returns:
+            def portfolio_variance(w):
+                return w @ self.sigma @ w
+            
+            constraints = [
+                {'type': 'eq', 'fun': lambda w: np.sum(w) - 1},
+                {'type': 'eq', 'fun': lambda w: w @ self.mu - target_ret}
+            ]
+            
+            if allow_short_selling:
+                bounds = None
+            else:
+                bounds = Bounds(0, 1)
+            
+            initial_guess = np.ones(self.n_assets) / self.n_assets
+            
             result = minimize(
-                lambda weights: self.portfolio_volatility(weights),
-                initial_weights,
-                method="SLSQP",
-                bounds=self._bounds(allow_short),
-                constraints=constraints,
+                portfolio_variance,
+                initial_guess,
+                method='SLSQP',
+                bounds=bounds,
+                constraints=constraints
             )
-
+            
             if result.success:
-                frontier.append(self._result(result.x))
-
-        return frontier
+                w = result.x
+                frontier_weights.append(w)
+                frontier_returns.append(target_ret)
+                frontier_stds.append(np.sqrt(w @ self.sigma @ w))
+        
+        return {
+            'returns': np.array(frontier_returns),
+            'stds': np.array(frontier_stds),
+            'weights': np.array(frontier_weights)
+        }
+    
+    def portfolio_stats(self, weights: np.ndarray) -> Dict[str, float]:
+        """
+        Calculate statistics for a given portfolio.
+        
+        Args:
+            weights: Portfolio weights
+            
+        Returns:
+            Dictionary with return, std, variance, and Sharpe ratio
+        """
+        p_return = weights @ self.mu
+        p_variance = weights @ self.sigma @ weights
+        p_std = np.sqrt(p_variance)
+        sharpe = (p_return - self.rf) / p_std if p_std > 0 else 0
+        
+        return {
+            'return': p_return,
+            'std': p_std,
+            'variance': p_variance,
+            'sharpe': sharpe
+        }
