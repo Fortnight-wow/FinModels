@@ -1,94 +1,179 @@
 import numpy as np
+from typing import Dict, Tuple
 from scipy.stats import norm
 
 
-def _returns_array(returns):
-    values = np.asarray(returns, dtype=float)
-    if values.ndim != 1:
-        raise ValueError("returns must be one-dimensional.")
-    if len(values) == 0:
-        raise ValueError("returns cannot be empty.")
-    return values
-
-
-def historical_var(returns, confidence_level: float = 0.95) -> float:
-    """Historical Value at Risk as a positive loss number."""
-    returns = _returns_array(returns)
-    if not 0 < confidence_level < 1:
-        raise ValueError("confidence_level must be between 0 and 1.")
-
-    percentile = 100 * (1 - confidence_level)
-    return float(-np.percentile(returns, percentile))
-
-
-def historical_cvar(returns, confidence_level: float = 0.95) -> float:
-    """Conditional Value at Risk as the average loss beyond VaR."""
-    returns = _returns_array(returns)
-    var_threshold = -historical_var(returns, confidence_level)
-    tail_returns = returns[returns <= var_threshold]
-
-    if len(tail_returns) == 0:
-        return 0.0
-
-    return float(-tail_returns.mean())
-
-
-def parametric_var(
-    mean_return: float,
-    volatility: float,
-    confidence_level: float = 0.95,
-) -> float:
-    if volatility < 0:
-        raise ValueError("volatility cannot be negative.")
-    if not 0 < confidence_level < 1:
-        raise ValueError("confidence_level must be between 0 and 1.")
-
-    quantile = norm.ppf(1 - confidence_level)
-    return float(-(mean_return + volatility * quantile))
-
-
-def monte_carlo_var(
-    mean_return: float,
-    volatility: float,
-    confidence_level: float = 0.95,
-    simulations: int = 10000,
-    seed=None,
-) -> float:
-    if simulations <= 0:
-        raise ValueError("simulations must be positive.")
-
-    rng = np.random.default_rng(seed)
-    simulated_returns = rng.normal(mean_return, volatility, simulations)
-    return historical_var(simulated_returns, confidence_level)
-
-
-def portfolio_returns(asset_returns, weights):
-    asset_returns = np.asarray(asset_returns, dtype=float)
-    weights = np.asarray(weights, dtype=float)
-
-    if asset_returns.ndim != 2:
-        raise ValueError("asset_returns must be a two-dimensional matrix.")
-    if asset_returns.shape[1] != len(weights):
-        raise ValueError("weights length must match the number of assets.")
-
-    return asset_returns @ weights
-
-
-def stress_test_portfolio(base_value: float, weights, shock_returns) -> dict[str, float]:
-    if base_value <= 0:
-        raise ValueError("base_value must be positive.")
-
-    weights = np.asarray(weights, dtype=float)
-    shock_returns = np.asarray(shock_returns, dtype=float)
-
-    if weights.shape != shock_returns.shape:
-        raise ValueError("weights and shock_returns must have the same shape.")
-
-    stressed_return = float(weights @ shock_returns)
-    stressed_value = base_value * (1 + stressed_return)
-
-    return {
-        "stressed_return": stressed_return,
-        "stressed_value": float(stressed_value),
-        "loss": float(base_value - stressed_value),
-    }
+class RiskMetrics:
+    """
+    Portfolio risk metrics: VaR, CVaR (Expected Shortfall), and stress testing.
+    
+    VaR: Value at Risk - maximum loss at a given confidence level
+    CVaR: Conditional Value at Risk (Expected Shortfall) - average loss beyond VaR
+    """
+    
+    @staticmethod
+    def value_at_risk(
+        returns: np.ndarray,
+        confidence: float = 0.95,
+        method: str = "historical"
+    ) -> float:
+        """
+        Calculate Value at Risk (VaR).
+        
+        Args:
+            returns: Array of historical or simulated returns
+            confidence: Confidence level (e.g., 0.95 for 95%)
+            method: "historical", "parametric", or "cornish_fisher"
+            
+        Returns:
+            VaR as a negative number (loss magnitude)
+        """
+        if method == "historical":
+            return np.percentile(returns, (1 - confidence) * 100)
+        
+        elif method == "parametric":
+            # Assumes normal distribution
+            mu = np.mean(returns)
+            sigma = np.std(returns)
+            return mu + sigma * norm.ppf(1 - confidence)
+        
+        elif method == "cornish_fisher":
+            # Adjusted for skewness and kurtosis
+            mu = np.mean(returns)
+            sigma = np.std(returns)
+            skew = (np.mean((returns - mu)**3)) / sigma**3
+            kurt = (np.mean((returns - mu)**4)) / sigma**4
+            
+            z = norm.ppf(1 - confidence)
+            z_cf = z + (z**2 - 1) * skew / 6 + (z**3 - 3*z) * (kurt - 3) / 24
+            
+            return mu + sigma * z_cf
+        
+        else:
+            raise ValueError(f"Unknown method: {method}")
+    
+    @staticmethod
+    def conditional_value_at_risk(
+        returns: np.ndarray,
+        confidence: float = 0.95
+    ) -> float:
+        """
+        Calculate Conditional Value at Risk (CVaR / Expected Shortfall).
+        Average loss beyond the VaR threshold.
+        
+        Args:
+            returns: Array of historical or simulated returns
+            confidence: Confidence level (e.g., 0.95 for 95%)
+            
+        Returns:
+            CVaR as a negative number (average loss magnitude)
+        """
+        var = RiskMetrics.value_at_risk(returns, confidence, method="historical")
+        cvar = np.mean(returns[returns <= var])
+        return cvar
+    
+    @staticmethod
+    def portfolio_risk_metrics(
+        returns: np.ndarray,
+        confidence: float = 0.95
+    ) -> Dict[str, float]:
+        """
+        Calculate comprehensive risk metrics for a portfolio.
+        
+        Args:
+            returns: Array of portfolio returns
+            confidence: Confidence level
+            
+        Returns:
+            Dictionary with VaR, CVaR, volatility, Sharpe ratio, etc.
+        """
+        var = RiskMetrics.value_at_risk(returns, confidence)
+        cvar = RiskMetrics.conditional_value_at_risk(returns, confidence)
+        
+        return {
+            'mean': np.mean(returns),
+            'std': np.std(returns),
+            'min': np.min(returns),
+            'max': np.max(returns),
+            'skewness': (np.mean((returns - np.mean(returns))**3)) / np.std(returns)**3,
+            'kurtosis': (np.mean((returns - np.mean(returns))**4)) / np.std(returns)**4,
+            'var': var,
+            'cvar': cvar,
+            'sharpe_ratio': np.mean(returns) / np.std(returns) if np.std(returns) > 0 else 0
+        }
+    
+    @staticmethod
+    def stress_test(
+        base_prices: np.ndarray,
+        shock_scenarios: Dict[str, float],
+        correlations: np.ndarray = None
+    ) -> Dict[str, np.ndarray]:
+        """
+        Perform stress testing by applying shocks to asset prices.
+        
+        Args:
+            base_prices: Base prices of assets
+            shock_scenarios: Dict mapping scenario name to shock magnitude
+            correlations: Correlation matrix for correlated shocks
+            
+        Returns:
+            Dictionary mapping scenario names to shocked prices
+        """
+        stressed_prices = {}
+        
+        for scenario_name, shock in shock_scenarios.items():
+            if correlations is not None:
+                # Apply correlated shocks
+                num_assets = len(base_prices)
+                independent_shocks = np.random.normal(shock, abs(shock) * 0.1, num_assets)
+                correlated_shocks = correlations @ independent_shocks
+                stressed_prices[scenario_name] = base_prices * (1 + correlated_shocks)
+            else:
+                # Independent shocks
+                stressed_prices[scenario_name] = base_prices * (1 + shock)
+        
+        return stressed_prices
+    
+    @staticmethod
+    def drawdown_analysis(prices: np.ndarray) -> Tuple[float, float, np.ndarray]:
+        """
+        Calculate maximum drawdown and drawdown series.
+        
+        Args:
+            prices: Array of prices over time
+            
+        Returns:
+            Tuple of (max_drawdown, duration, drawdown_series)
+        """
+        cumulative_max = np.maximum.accumulate(prices)
+        drawdown = (prices - cumulative_max) / cumulative_max
+        max_drawdown = np.min(drawdown)
+        
+        # Calculate duration of maximum drawdown
+        max_dd_idx = np.argmin(drawdown)
+        peak_idx = np.argmax(prices[:max_dd_idx])
+        duration = max_dd_idx - peak_idx
+        
+        return max_drawdown, duration, drawdown
+    
+    @staticmethod
+    def rolling_volatility(
+        returns: np.ndarray,
+        window: int = 20
+    ) -> np.ndarray:
+        """
+        Calculate rolling volatility (moving standard deviation).
+        
+        Args:
+            returns: Array of returns
+            window: Rolling window size
+            
+        Returns:
+            Array of rolling volatilities
+        """
+        rolling_vols = np.zeros(len(returns) - window + 1)
+        
+        for i in range(len(rolling_vols)):
+            rolling_vols[i] = np.std(returns[i:i+window])
+        
+        return rolling_vols
